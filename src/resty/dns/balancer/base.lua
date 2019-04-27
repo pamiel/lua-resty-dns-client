@@ -250,12 +250,29 @@ function objAddr:change(newWeight)
           self.weight, " -> ", newWeight)
 
   self.host:addWeight(newWeight - self.weight)
+  if not self.available then
+    self.host:addUnavailableWeight(newWeight - self.weight)
+  end
+
   self.weight = newWeight
 end
 
 -- Set the availability of the address.
 function objAddr:setState(available)
-  self.available = not not available -- force to boolean
+  available = not not available -- force to boolean
+  local old_state = self.available
+
+  if old_state == available then
+    return  -- no state change
+  end
+
+  -- state changed
+  self.available = available
+  if available then
+    self.host:addUnavailableWeight(-self.weight)
+  else
+    self.host:addUnavailableWeight(self.weight)
+  end
 end
 
 -- Release any connection resources or record statistics.
@@ -557,6 +574,13 @@ function objHost:addWeight(delta)
   self.balancer:addWeight(delta)
 end
 
+-- Changes the host overall unavailable weight. It will also update the parent balancer object.
+-- This will be called by the `address` object whenever it changes its unavailable weight.
+function objHost:addUnavailableWeight(delta)
+  self.unavailableWeight = self.unavailableWeight + delta
+  self.balancer:addUnavailableWeight(delta)
+end
+
 -- Updates the host nodeWeight.
 -- @return `true` if something changed that might impact the balancer algorithm
 function objHost:change(newWeight)
@@ -706,11 +730,12 @@ function objBalancer:newHost(host)
   host = setmetatable(host, mt_objHost)
   host.super = objHost
   host.log_prefix = host.balancer.log_prefix
-  host.weight = 0           -- overall weight of all addresses within this hostname
-  host.lastQuery = nil      -- last successful dns query performed
-  host.lastSorted = nil     -- last successful dns query, sorted for comparison
-  host.addresses = {}       -- list of addresses (address objects) this host resolves to
-  host.expire = nil         -- time when the dns query this host is based upon expires
+  host.weight = 0            -- overall weight of all addresses within this hostname
+  host.unavailableWeight = 0 -- overall weight of unavailable addresses within this hostname
+  host.lastQuery = nil       -- last successful dns query performed
+  host.lastSorted = nil      -- last successful dns query, sorted for comparison
+  host.addresses = {}        -- list of addresses (address objects) this host resolves to
+  host.expire = nil          -- time when the dns query this host is based upon expires
 
 
   -- insert into our parent balancer before recalculating (in queryDns)
@@ -926,6 +951,12 @@ function objBalancer:addWeight(delta)
   self.weight = self.weight + delta
 end
 
+-- Updates the total unavailable weight.
+-- @param delta the in/decrease of the overall unavailable weight (negative for decrease)
+function objBalancer:addUnavailableWeight(delta)
+  self.unavailableWeight = self.unavailableWeight + delta
+end
+
 
 --- Gets the next ip address and port according to the loadbalancing scheme.
 -- If the dns record attached to the requested address is expired, then it will
@@ -967,7 +998,7 @@ function objBalancer:getPeer(cacheOnly, handle, hashValue)
       -- we have a new hashValue, use it anyway
       handle.hashValue = hashValue
     else
-      hashValue = handle.hashValue  -- reuse exiting (if any) hashvalue
+      hashValue = handle.hashValue  -- reuse existing (if any) hashvalue
     end
     handle.retryCount = handle.retryCount + 1
     handle.address:release(handle, true)  -- release any resources
@@ -981,8 +1012,8 @@ function objBalancer:getPeer(cacheOnly, handle, hashValue)
 
   local address
   while true do
-    if self.weight == 0 then
-      -- the balancer weight is 0, so we have no targets at all.
+    if self.weight == self.unavailableWeight then
+      -- we have no available targets at all.
       -- This check must be inside the loop, since caling getPeer could
       -- cause a DNS update.
       self:release(handle, true)  -- no address is set, just release handle itself
@@ -1196,6 +1227,18 @@ function objBalancer:getHandle(gc_handler, release_handler)
   return h
 end
 
+--- Gets the weight of the balancer.
+-- Note that the overall weight depends on DNS resolution, and hence can
+-- over time.
+-- @return total_weight, unavailable_weight
+-- @usage
+-- local weight, unavailable = balancer:getWeight()
+-- print("Total balancer weight is: ", weight)
+-- print("Available part is (%)   : ", (weight-unavailable)/weight * 100)
+-- print("Unavailable part is (%) : ", unavailable/weight * 100)
+function objBalancer:getWeight()
+  return self.weight, self.unavailableWeight
+end
 
 --- Creates a new base balancer.
 --
@@ -1233,6 +1276,7 @@ _M.new = function(opts)
     hosts = {},    -- a list a host objects
     addresses = {}, -- a list of addresses, including reverse lookup
     weight = 0,    -- total weight of all hosts
+    unavailableWeight = 0,  -- the unavailable weight (range: 0 - weight)
     dns = opts.dns,  -- the configured dns client to use for resolving
     requeryTimer = nil,  -- requery timer is not running, see `startRequery`
     requeryInterval = opts.requery or REQUERY_INTERVAL,  -- how often to requery failed dns lookups (seconds)

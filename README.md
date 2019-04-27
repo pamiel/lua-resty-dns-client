@@ -41,6 +41,11 @@ History
 
 Versioning is strictly based on [Semantic Versioning](https://semver.org/)
 
+### x.x.x (x-xxx-2019)
+
+- Added: keep track of unavailable weight. Added the `getWeight` method to
+  return overall weight and unavailable weight as a measure of health.
+
 ### 3.0.2 (8-Mar-2019) Bugfix
 
 - Fix: callback for adding an address did not pass the address object, but
